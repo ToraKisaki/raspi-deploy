@@ -115,11 +115,14 @@ fecg = np.load("fecg_out.npy")   # shape: (N,), float32
 ```
 raw input (250 Hz)
     → Butterworth bandpass filter [3–90 Hz, order 3]
-    → Divide by global_var (7.2160)          ← training normalization
+    → Per-sample z-score: x = (x − mean) / std   ← training normalization
     → UNETR INT8 inference [1, 1, 992]
-    → Multiply by global_var                  ← denormalize
+    → Denormalize: out × std + mean
     → fECG output
 ```
+
+Each 992-sample window is normalized independently, so the model is
+robust to amplitude differences between recording setups.
 
 ---
 
@@ -143,6 +146,6 @@ Throughput ~8–12× real-time on RPi 5.
 | Training data | fecgsyndb 1-subject, 34-channel |
 | Input shape | `[B, 1, 992]` |
 | Output shape | `[B, 2, 992]` → fECG = channel index 1 |
-| Normalize mode | `var_global` (global_var = 7.2160) |
+| Normalize mode | per-sample z-score `(x − mean) / std` |
 | Val SSIM | ~0.796 (12,800 samples) |
 | Val PSNR | ~26.82 dB |

@@ -11,11 +11,11 @@ import onnxruntime as ort
 from scipy.signal import butter, filtfilt
 import os
 
-MODEL_PATH = os.path.join(os.path.dirname(__file__), "models", "unetr_int8.onnx")
-SAMPLE_RATE = 250        # Hz
-SAMPLE_LEN  = 992        # samples per window (~3.97 s)
-GLOBAL_VAR  = 7.2159853  # training normalization constant (var_global)
+MODEL_PATH  = os.path.join(os.path.dirname(__file__), "models", "unetr_int8.onnx")
+SAMPLE_RATE = 250    # Hz
+SAMPLE_LEN  = 992    # samples per window (~3.97 s)
 BANDPASS    = (3.0, 90.0)
+NORM_EPS    = 1e-8   # prevents division by zero in std normalization
 
 
 def bandpass_filter(signal: np.ndarray, lowcut: float, highcut: float, fs: float, order: int = 3) -> np.ndarray:
@@ -24,20 +24,24 @@ def bandpass_filter(signal: np.ndarray, lowcut: float, highcut: float, fs: float
     return filtfilt(b, a, signal).astype(np.float32)
 
 
-def preprocess(signal_992: np.ndarray) -> np.ndarray:
+def preprocess(signal_992: np.ndarray):
+    """Bandpass → per-sample z-score (std). Returns (x_norm [1,1,992], mu, sigma)."""
     x = np.asarray(signal_992, dtype=np.float32).copy()
     x = bandpass_filter(x, BANDPASS[0], BANDPASS[1], SAMPLE_RATE)
-    x = x / np.float32(GLOBAL_VAR)
-    return x[None, None, :]  # [1, 1, 992]
+    mu    = np.float32(np.mean(x))
+    sigma = np.float32(np.std(x) + NORM_EPS)
+    x = (x - mu) / sigma
+    return x[None, None, :], mu, sigma  # [1, 1, 992], scalar, scalar
 
 
-def postprocess(output: np.ndarray, scale: float = GLOBAL_VAR) -> np.ndarray:
-    # output shape: [1, 2, 992] (dual) or [1, 1, 992] (single)
+def postprocess(output: np.ndarray, mu: float, sigma: float) -> np.ndarray:
+    """Denormalize model output back to original amplitude."""
+    # output shape: [1, 2, 992] (dual-branch) or [1, 1, 992] (single)
     if output.shape[1] == 2:
         fecg = output[0, 1, :]  # fECG is channel index 1
     else:
         fecg = output[0, 0, :]
-    return (fecg * scale).astype(np.float32)
+    return (fecg * sigma + mu).astype(np.float32)
 
 
 def load_session(model_path: str = MODEL_PATH) -> ort.InferenceSession:
@@ -47,9 +51,9 @@ def load_session(model_path: str = MODEL_PATH) -> ort.InferenceSession:
 
 
 def run_inference(session: ort.InferenceSession, signal_992: np.ndarray) -> np.ndarray:
-    x = preprocess(signal_992)
+    x, mu, sigma = preprocess(signal_992)
     out = session.run(None, {"input": x})[0]
-    return postprocess(out)
+    return postprocess(out, mu, sigma)
 
 
 def sliding_window_inference(session: ort.InferenceSession, signal: np.ndarray, step: int = SAMPLE_LEN) -> np.ndarray:
