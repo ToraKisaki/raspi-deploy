@@ -1,0 +1,10 @@
+# Raspberry Pi 5 device app (bedside monitor)
+PyQt5
+pyqtgraph
+numpy
+websocket-client
+lgpio                # Pi 5 GPIO  (on the Pi: sudo apt install python3-lgpio)
+
+# AI model runtime — same as the repo-root requirements.txt, used by ../infer.py
+onnxruntime>=1.16.0  # aarch64 wheel on the Pi; see ../README.md if pip can't find it
+scipy>=1.10.0        # Butterworth band-pass in infer.py

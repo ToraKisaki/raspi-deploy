@@ -4,3 +4,12 @@ __pycache__/
 !examples/*.npy
 *.csv
 .DS_Store
+
+# local tooling / runtime
+.claude/
+.venv/
+venv/
+fecg.db
+fecg.db-wal
+fecg.db-shm
+fecg-monitor.log

@@ -6,6 +6,7 @@ Usage:
 """
 
 import argparse
+import time
 import numpy as np
 import onnxruntime as ort
 from scipy.signal import butter, filtfilt
@@ -72,6 +73,7 @@ def main():
     parser.add_argument("--output", default="fecg_out.npy", help="Output .npy path")
     parser.add_argument("--model",  default=MODEL_PATH, help="ONNX model path")
     parser.add_argument("--plot",   action="store_true", help="Plot result (requires matplotlib)")
+    parser.add_argument("--ref",    default=None, help="Reference fECG .npy for comparison plot")
     args = parser.parse_args()
 
     signal = np.load(args.input).astype(np.float32).ravel()
@@ -80,13 +82,16 @@ def main():
     session = load_session(args.model)
     print(f"Model loaded: {args.model}")
 
+    t0 = time.perf_counter()
     if len(signal) == SAMPLE_LEN:
         fecg = run_inference(session, signal)
     else:
         fecg = sliding_window_inference(session, signal)
+    elapsed = time.perf_counter() - t0
 
     np.save(args.output, fecg)
     print(f"fECG saved: {args.output}  shape={fecg.shape}")
+    print(f"Inference time: {elapsed*1000:.1f} ms")
 
     if args.plot:
         import matplotlib.pyplot as plt
@@ -95,6 +100,9 @@ def main():
         ax1.plot(t[:len(signal)], signal, lw=0.7, label="mixture")
         ax1.set_ylabel("Amplitude"); ax1.legend()
         ax2.plot(t[:len(fecg)], fecg, lw=0.7, color="orange", label="fECG (extracted)")
+        if args.ref:
+            ref = np.load(args.ref).astype(np.float32).ravel()
+            ax2.plot(t[:len(ref)], ref, lw=0.7, color="green", alpha=0.7, label="fECG (reference)")
         ax2.set_ylabel("Amplitude"); ax2.set_xlabel("Time (s)"); ax2.legend()
         plt.tight_layout(); plt.show()
 
