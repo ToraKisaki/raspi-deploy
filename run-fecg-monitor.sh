@@ -21,4 +21,4 @@ sleep 0.3
 echo "----- $(date '+%Y-%m-%d %H:%M:%S') launching fECG monitor -> $FECG_SERVER_URL (patient $FECG_PATIENT_ID) -----" >> "$LOG"
 
 # fullscreen monitor (pass --windowed / --sim through if given, e.g. for testing)
-exec "$PY" "$REPO/device/main.py" "$@" >> "$LOG" 2>&1
+exec "$PY" "$REPO/device/main.py" --file "$REPO/test_data" "$@" >> "$LOG" 2>&1

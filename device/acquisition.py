@@ -22,38 +22,68 @@ from config import (
 
 
 class FileSource:
-    """Replays a saved .npy recording at the sample rate, as if it were live.
+    """Replays a saved recording at the sample rate, as if it were live.
 
-    The file is treated as a 1-D raw abdominal-lead signal at SAMPLE_RATE_HZ.
-    A 2-D array is reduced to one channel (default ABDOMINAL_CHANNEL): shape
-    (C, N) -> row, shape (N, C) -> column. Set loop=False to play once and stop.
+    Supports .npy (1D or 2D) and .npz (looks for 'mix' array).
+    Also supports pointing to a directory to loop over all .npy/.npz files.
     Marked is_simulated=True so callers treat it like the simulator, not hardware.
     """
     is_simulated = True
 
     def __init__(self, path, fs=SAMPLE_RATE_HZ, channel=ABDOMINAL_CHANNEL, loop=True):
         import os
+        import glob
         self.path = path
         self.fs = fs
+        self.channel = channel
         self.loop = loop
-        arr = np.asarray(np.load(path), dtype=np.float32)
+        
+        if os.path.isdir(path):
+            # Sort files to play them in order
+            self.files = sorted(glob.glob(os.path.join(path, "*.npy")) + glob.glob(os.path.join(path, "*.npz")))
+            self.label = f"DIR:{os.path.basename(path)}"
+        else:
+            self.files = [path]
+            self.label = f"FILE:{os.path.basename(path)}"
+            
+        self.file_idx = 0
+        self._load_current_file()
+
+    def _load_current_file(self):
+        if not self.files:
+            self.signal = np.zeros(1000, dtype=np.float32)
+            self.n = 1000
+            return
+            
+        curr_path = self.files[self.file_idx]
+        data = np.load(curr_path)
+        if str(curr_path).endswith('.npz') and 'mix' in data:
+            arr = np.asarray(data['mix'], dtype=np.float32)
+        else:
+            arr = np.asarray(data, dtype=np.float32)
+
         if arr.ndim == 2:
             if arr.shape[0] <= arr.shape[1]:        # (C, N) -> pick a row
-                arr = arr[min(channel, arr.shape[0] - 1)]
+                arr = arr[min(self.channel, arr.shape[0] - 1)]
             else:                                    # (N, C) -> pick a column
-                arr = arr[:, min(channel, arr.shape[1] - 1)]
+                arr = arr[:, min(self.channel, arr.shape[1] - 1)]
         self.signal = arr.ravel()
         self.n = int(self.signal.shape[0])
-        self.label = f"FILE:{os.path.basename(path)}"
 
     def samples(self):
         dt = 1.0 / self.fs
         i = 0
         while True:
             if i >= self.n:
-                if not self.loop:
-                    return
+                self.file_idx += 1
+                if self.file_idx >= len(self.files):
+                    if not self.loop:
+                        return
+                    self.file_idx = 0
+                self._load_current_file()
                 i = 0
+                continue
+            
             ch = [0.0] * N_INPUT_CHANNELS
             ch[ABDOMINAL_CHANNEL] = float(self.signal[i])
             i += 1
@@ -129,7 +159,7 @@ def make_source(force_sim=False, file_path=None, loop=True):
     if file_path:
         src = FileSource(file_path, loop=loop)
         print(f"[acquisition] FILE playback: {file_path}  "
-              f"({src.n} samples, {src.n / SAMPLE_RATE_HZ:.1f}s @ {SAMPLE_RATE_HZ} Hz, "
+              f"({src.n} samples in current file, {src.n / SAMPLE_RATE_HZ:.1f}s @ {SAMPLE_RATE_HZ} Hz, "
               f"loop={loop})")
         return src
     if not force_sim:
