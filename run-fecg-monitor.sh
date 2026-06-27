@@ -4,7 +4,7 @@
 # "fECG Monitor" desktop icon, or run this script directly.
 #
 # ============ EDIT THESE to match your setup ============
-export FECG_SERVER_URL="ws://192.168.1.74:8000/ws/device"   # PC server (ws://<PC-IP>:8000/ws/device)
+export FECG_SERVER_URL="ws://10.244.67.126:8000/ws/device"   # PC server (ws://<PC-IP>:8000/ws/device)
 export FECG_DEVICE_TOKEN="device-secret-001"                # MUST match the server's token
 export FECG_PATIENT_ID="P001"                               # which patient this bed records
 # =======================================================
@@ -21,4 +21,4 @@ sleep 0.3
 echo "----- $(date '+%Y-%m-%d %H:%M:%S') launching fECG monitor -> $FECG_SERVER_URL (patient $FECG_PATIENT_ID) -----" >> "$LOG"
 
 # fullscreen monitor (pass --windowed / --sim through if given, e.g. for testing)
-exec "$PY" "$REPO/device/main.py" --file "$REPO/test_data" "$@" >> "$LOG" 2>&1
+exec "$PY" "$REPO/device/main.py" --file "$REPO/examples/test_data" "$@" >> "$LOG" 2>&1
