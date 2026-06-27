@@ -31,8 +31,15 @@ from config import (
 from acquisition import make_source
 from fecg_processor import FecgProcessor
 from uploader import Uploader
+from hr import (
+    estimate_bpm, ema,
+    FHR_MIN, FHR_MAX, MHR_MIN, MHR_MAX, FHR_REFRACTORY_S, MHR_REFRACTORY_S,
+)
 
 BUF = int(SAMPLE_RATE_HZ * PLOT_WINDOW_SECONDS)
+
+RAW_COLOR = "#00E5FF"
+FECG_COLOR = "#FF4081"
 
 
 class Acquirer(QtCore.QObject):
@@ -60,7 +67,7 @@ class Acquirer(QtCore.QObject):
                           file_path=self.file_path, loop=self.loop)
         kind = getattr(src, "label", None) or (
             "SIMULATOR" if getattr(src, "is_simulated", False) else "ADS1293")
-        self.status.emit(f"{kind} | {self.proc.info}")
+        self.status.emit(str(kind))
         for ch in src.samples():
             if self._stop.is_set():
                 break
@@ -82,7 +89,32 @@ class Acquirer(QtCore.QObject):
         self.uploader.stop()
 
 
+class HRTile(QtWidgets.QWidget):
+    """Compact big-number heart-rate readout (label + bpm + units)."""
+
+    def __init__(self, name, color):
+        super().__init__()
+        lay = QtWidgets.QVBoxLayout(self)
+        lay.setContentsMargins(8, 0, 8, 0)
+        lay.setSpacing(0)
+        self.name = QtWidgets.QLabel(name)
+        self.name.setStyleSheet(f"color:{color}; font:bold 10px monospace;")
+        self.value = QtWidgets.QLabel("—")
+        self.value.setStyleSheet(f"color:{color}; font:bold 34px monospace;")
+        self.units = QtWidgets.QLabel("bpm")
+        self.units.setStyleSheet("color:#888; font:9px monospace;")
+        lay.addWidget(self.name)
+        lay.addWidget(self.value)
+        lay.addWidget(self.units)
+
+    def set(self, bpm):
+        self.value.setText(str(int(round(bpm))) if bpm is not None else "—")
+
+
 class Monitor(QtWidgets.QWidget):
+    # recompute heart rate ~3x/sec (the plot itself redraws at ~30 fps)
+    HR_EVERY = 10
+
     def __init__(self, acq):
         super().__init__()
         self.acq = acq
@@ -95,22 +127,41 @@ class Monitor(QtWidgets.QWidget):
         layout.setContentsMargins(2, 2, 2, 2)
         layout.setSpacing(2)
 
-        # header
+        # header: patient + signal source (no model details)
         self.header = QtWidgets.QLabel(f"Patient {PATIENT_ID}   •   starting…")
         self.header.setStyleSheet("color:#7CFC00; font:bold 11px monospace;")
         layout.addWidget(self.header)
 
+        # heart-rate readouts: FHR (from fECG) + MHR (from raw)
+        hr_row = QtWidgets.QHBoxLayout()
+        hr_row.setContentsMargins(0, 0, 0, 0)
+        hr_row.setSpacing(2)
+        self.fhr_tile = HRTile("FHR", FECG_COLOR)
+        self.mhr_tile = HRTile("MHR", RAW_COLOR)
+        hr_row.addWidget(self.fhr_tile)
+        hr_row.addWidget(self.mhr_tile)
+        hr_row.addStretch(1)
+        layout.addLayout(hr_row)
+
+        # one shared time axis so both traces scroll together in real time
         x = np.linspace(-PLOT_WINDOW_SECONDS, 0, BUF)
 
-        self.p_raw = self._plot("RAW (abdominal)", "#00E5FF")
-        self.c_raw = self.p_raw.plot(x, self.acq.raw, pen=pg.mkPen("#00E5FF", width=1))
+        self.p_raw = self._plot("RAW", RAW_COLOR)
+        self.c_raw = self.p_raw.plot(x, self.acq.raw, pen=pg.mkPen(RAW_COLOR, width=1))
         layout.addWidget(self.p_raw)
 
-        self.p_fe = self._plot("fECG (AI extracted)", "#FF4081")
-        self.c_fe = self.p_fe.plot(x, self.acq.fecg, pen=pg.mkPen("#FF4081", width=1))
+        self.p_fe = self._plot("fECG", FECG_COLOR)
+        self.c_fe = self.p_fe.plot(x, self.acq.fecg, pen=pg.mkPen(FECG_COLOR, width=1))
         layout.addWidget(self.p_fe)
 
+        # lock the fECG x-axis to the raw one: identical window, no drift
+        self.p_fe.setXLink(self.p_raw)
+        self.p_raw.setXRange(-PLOT_WINDOW_SECONDS, 0, padding=0)
+
         self.x = x
+        self.fhr = None
+        self.mhr = None
+        self._frame = 0
         self.acq.status.connect(self._set_status)
 
         self.timer = QtCore.QTimer(self)
@@ -136,11 +187,25 @@ class Monitor(QtWidgets.QWidget):
         raw, fe = self.acq.snapshot()
         self.c_raw.setData(self.x, raw)
         self.c_fe.setData(self.x, fe)
-        # auto-range Y with a little headroom, fixed X
+        # auto-range Y only (X is fixed & linked, so both stay time-aligned)
         for p, d in ((self.p_raw, raw), (self.p_fe, fe)):
             m = max(0.2, float(np.max(np.abs(d))) * 1.2)
             p.setYRange(-m, m, padding=0)
-            p.setXRange(-PLOT_WINDOW_SECONDS, 0, padding=0)
+
+        self._frame += 1
+        if self._frame % self.HR_EVERY == 0:
+            self._update_hr(raw, fe)
+
+    def _update_hr(self, raw, fe):
+        fs = SAMPLE_RATE_HZ
+        f = estimate_bpm(fe, fs, FHR_MIN, FHR_MAX, FHR_REFRACTORY_S)
+        m = estimate_bpm(raw, fs, MHR_MIN, MHR_MAX, MHR_REFRACTORY_S)
+        if f is not None:
+            self.fhr = ema(self.fhr, f)
+        if m is not None:
+            self.mhr = ema(self.mhr, m)
+        self.fhr_tile.set(self.fhr)
+        self.mhr_tile.set(self.mhr)
 
     def keyPressEvent(self, e):
         if e.key() == QtCore.Qt.Key_Escape:
