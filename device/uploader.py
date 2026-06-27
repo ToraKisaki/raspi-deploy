@@ -34,6 +34,8 @@ class Uploader:
         self._stop = threading.Event()
         self.connected = False
         self.enabled = _HAVE_WS
+        self.session_id = None
+        self.patient = None        # {id,name,mrn,sex,dob,notes} from server ack
         if self.enabled:
             threading.Thread(target=self._run, daemon=True).start()
 
@@ -60,6 +62,20 @@ class Uploader:
                 }))
                 self.connected = True
                 print(f"[uploader] connected to {self.url}")
+                # read the server's ack (carries patient identity); a missing or
+                # slow ack must not tear down an otherwise healthy connection
+                try:
+                    ack = json.loads(ws.recv())
+                    if ack.get("type") == "ack":
+                        self.session_id = ack.get("session_id")
+                        if ack.get("patient"):
+                            self.patient = ack["patient"]
+                    elif ack.get("type") == "error":
+                        raise RuntimeError(ack.get("detail", "server rejected device"))
+                except RuntimeError:
+                    raise
+                except Exception:
+                    pass  # no/garbled ack -> just stream without patient info
                 while not self._stop.is_set():
                     batch = self.q.get()
                     ws.send(json.dumps({

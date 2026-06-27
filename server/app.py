@@ -121,8 +121,15 @@ async def ws_device(ws: WebSocket):
                 db.upsert_patient(patient_id)
                 session_id = db.start_session(patient_id, rate)
                 hub.analyzers[patient_id] = PatientAnalyzer(rate)
-                await ws.send_text(json.dumps({"type": "ack",
-                                               "session_id": session_id}))
+                # send patient identity back so the bedside device can show
+                # name/MRN (the device has no doctor login to call the REST API)
+                p = db.get_patient(patient_id) or {}
+                await ws.send_text(json.dumps({
+                    "type": "ack",
+                    "session_id": session_id,
+                    "patient": {k: p.get(k)
+                                for k in ("id", "name", "mrn", "sex", "dob", "notes")},
+                }))
 
             elif mtype == "samples" and session_id is not None:
                 batch = msg["data"]               # [[t,raw,fecg], ...]

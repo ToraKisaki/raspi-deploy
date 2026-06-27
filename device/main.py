@@ -19,6 +19,7 @@ import sys
 import time
 import threading
 import argparse
+from collections import deque
 import numpy as np
 
 from PyQt5 import QtWidgets, QtCore
@@ -40,6 +41,10 @@ BUF = int(SAMPLE_RATE_HZ * PLOT_WINDOW_SECONDS)
 
 RAW_COLOR = "#00E5FF"
 FECG_COLOR = "#FF4081"
+
+# trend (mini-CTG): one point per HR recompute (~3/s); ~3 min of history
+TREND_LEN = 600
+FHR_NORMAL = (110, 160)   # normal fetal band drawn as reference lines
 
 
 class Acquirer(QtCore.QObject):
@@ -147,15 +152,25 @@ class Monitor(QtWidgets.QWidget):
         head_row.addWidget(self.warn)
         layout.addLayout(head_row)
 
-        # heart-rate readouts: FHR (from fECG) + MHR (from raw)
+        # heart-rate readouts (FHR from fECG, MHR from raw) + a trend graph
+        # filling the space to their right (mini cardiotocograph).
         hr_row = QtWidgets.QHBoxLayout()
         hr_row.setContentsMargins(0, 0, 0, 0)
-        hr_row.setSpacing(2)
+        hr_row.setSpacing(4)
         self.fhr_tile = HRTile("FHR", FECG_COLOR)
         self.mhr_tile = HRTile("MHR", RAW_COLOR)
         hr_row.addWidget(self.fhr_tile)
         hr_row.addWidget(self.mhr_tile)
-        hr_row.addStretch(1)
+
+        self.p_trend = self._trend_plot()
+        self.fhr_hist = deque([np.nan] * TREND_LEN, maxlen=TREND_LEN)
+        self.mhr_hist = deque([np.nan] * TREND_LEN, maxlen=TREND_LEN)
+        self._trend_x = np.arange(TREND_LEN)
+        self.t_fhr = self.p_trend.plot([], [], pen=pg.mkPen(FECG_COLOR, width=1),
+                                       connect="finite")
+        self.t_mhr = self.p_trend.plot([], [], pen=pg.mkPen(RAW_COLOR, width=1),
+                                       connect="finite")
+        hr_row.addWidget(self.p_trend, 1)   # stretch=1 -> takes the leftover width
         layout.addLayout(hr_row)
 
         # one shared time axis so both traces scroll together in real time.
@@ -180,6 +195,7 @@ class Monitor(QtWidgets.QWidget):
         self.fhr = None
         self.mhr = None
         self._frame = 0
+        self._source = "starting…"
         self.acq.status.connect(self._set_status)
 
         self.timer = QtCore.QTimer(self)
@@ -210,8 +226,43 @@ class Monitor(QtWidgets.QWidget):
             bottom.setStyle(showValues=False)
         return p
 
+    def _trend_plot(self):
+        """Mini cardiotocograph: FHR/MHR over the last few minutes (bpm)."""
+        p = pg.PlotWidget()
+        p.setBackground("#000")
+        p.setMenuEnabled(False)
+        p.hideButtons()
+        p.setMouseEnabled(False, False)
+        p.setTitle("TREND (bpm)", color="#aaa", size="7pt")
+        p.setMaximumHeight(80)               # don't steal height from the waveforms
+        p.showGrid(x=False, y=True, alpha=0.2)
+        p.setYRange(50, 210, padding=0)
+        p.setXRange(0, TREND_LEN, padding=0)
+        left = p.getAxis("left")
+        left.setStyle(tickFont=pg.QtGui.QFont("monospace", 6))
+        left.setTicks([[(60, "60"), (110, "110"), (160, "160"), (200, "200")]])
+        p.getAxis("bottom").setStyle(showValues=False)   # time axis, no clutter
+        # faint dashed reference lines for the normal fetal band
+        for y in FHR_NORMAL:
+            p.addItem(pg.InfiniteLine(
+                pos=y, angle=0,
+                pen=pg.mkPen("#664455", width=1, style=QtCore.Qt.DashLine)))
+        return p
+
     def _set_status(self, s):
-        self.header.setText(f"Patient {PATIENT_ID}   •   {s}")
+        self._source = s
+        self._refresh_header()
+
+    def _refresh_header(self):
+        """Compose the header from patient identity (from server) + source."""
+        p = getattr(self.acq.uploader, "patient", None) or {}
+        bits = [PATIENT_ID]
+        name = p.get("name")
+        if name and name != PATIENT_ID:
+            bits.append(name)
+        if p.get("mrn"):
+            bits.append(f"MRN {p['mrn']}")
+        self.header.setText(f"{' · '.join(bits)}   •   {self._source}")
 
     def _update(self):
         raw, fe = self.acq.snapshot()
@@ -236,6 +287,17 @@ class Monitor(QtWidgets.QWidget):
             self.mhr = ema(self.mhr, m)
         self.fhr_tile.set(self.fhr)
         self.mhr_tile.set(self.mhr)
+
+        # append to the trend (NaN where unknown so the line breaks, not dips)
+        self.fhr_hist.append(self.fhr if self.fhr is not None else np.nan)
+        self.mhr_hist.append(self.mhr if self.mhr is not None else np.nan)
+        self.t_fhr.setData(self._trend_x, np.fromiter(self.fhr_hist, dtype=float),
+                           connect="finite")
+        self.t_mhr.setData(self._trend_x, np.fromiter(self.mhr_hist, dtype=float),
+                           connect="finite")
+
+        # patient identity arrives async from the server after connect
+        self._refresh_header()
 
     def keyPressEvent(self, e):
         if e.key() == QtCore.Qt.Key_Escape:
