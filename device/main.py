@@ -127,10 +127,25 @@ class Monitor(QtWidgets.QWidget):
         layout.setContentsMargins(2, 2, 2, 2)
         layout.setSpacing(2)
 
-        # header: patient + signal source (no model details)
+        # header: patient + signal source (no model name), plus a model-health
+        # badge — we hide the model *name* but never hide a model *failure*:
+        # without the real ONNX model the extractor falls back to a filter whose
+        # output looks almost like raw, so it must be called out loudly.
+        head_row = QtWidgets.QHBoxLayout()
+        head_row.setContentsMargins(0, 0, 0, 0)
+        head_row.setSpacing(6)
         self.header = QtWidgets.QLabel(f"Patient {PATIENT_ID}   •   starting…")
         self.header.setStyleSheet("color:#7CFC00; font:bold 11px monospace;")
-        layout.addWidget(self.header)
+        self.warn = QtWidgets.QLabel("⚠ NO MODEL")
+        self.warn.setStyleSheet(
+            "color:#000; background:#FF3B30; font:bold 10px monospace; padding:1px 4px;")
+        info = getattr(self.acq.proc, "info", "") or ""
+        self._model_ok = not ("placeholder" in info.lower() or "unavailable" in info.lower())
+        self.warn.setVisible(not self._model_ok)
+        head_row.addWidget(self.header)
+        head_row.addStretch(1)
+        head_row.addWidget(self.warn)
+        layout.addLayout(head_row)
 
         # heart-rate readouts: FHR (from fECG) + MHR (from raw)
         hr_row = QtWidgets.QHBoxLayout()
@@ -143,20 +158,23 @@ class Monitor(QtWidgets.QWidget):
         hr_row.addStretch(1)
         layout.addLayout(hr_row)
 
-        # one shared time axis so both traces scroll together in real time
-        x = np.linspace(-PLOT_WINDOW_SECONDS, 0, BUF)
+        # one shared time axis so both traces scroll together in real time.
+        # 0 s = oldest sample (left), PLOT_WINDOW_SECONDS = newest (right edge) —
+        # positive seconds across the visible window, no confusing negatives.
+        x = np.linspace(0, PLOT_WINDOW_SECONDS, BUF)
 
-        self.p_raw = self._plot("RAW", RAW_COLOR)
+        # top trace shares the bottom trace's x-axis, so only label time once
+        self.p_raw = self._plot("RAW", RAW_COLOR, show_time=False)
         self.c_raw = self.p_raw.plot(x, self.acq.raw, pen=pg.mkPen(RAW_COLOR, width=1))
         layout.addWidget(self.p_raw)
 
-        self.p_fe = self._plot("fECG", FECG_COLOR)
+        self.p_fe = self._plot("fECG", FECG_COLOR, show_time=True)
         self.c_fe = self.p_fe.plot(x, self.acq.fecg, pen=pg.mkPen(FECG_COLOR, width=1))
         layout.addWidget(self.p_fe)
 
         # lock the fECG x-axis to the raw one: identical window, no drift
         self.p_fe.setXLink(self.p_raw)
-        self.p_raw.setXRange(-PLOT_WINDOW_SECONDS, 0, padding=0)
+        self.p_raw.setXRange(0, PLOT_WINDOW_SECONDS, padding=0)
 
         self.x = x
         self.fhr = None
@@ -168,7 +186,7 @@ class Monitor(QtWidgets.QWidget):
         self.timer.timeout.connect(self._update)
         self.timer.start(33)  # ~30 fps
 
-    def _plot(self, title, color):
+    def _plot(self, title, color, show_time=True):
         p = pg.PlotWidget()
         p.setBackground("#000")
         p.showGrid(x=True, y=True, alpha=0.2)
@@ -176,8 +194,20 @@ class Monitor(QtWidgets.QWidget):
         p.hideButtons()
         p.setMouseEnabled(False, False)
         p.setTitle(title, color=color, size="8pt")
-        p.getAxis("left").setStyle(tickFont=pg.QtGui.QFont("monospace", 6))
-        p.getAxis("bottom").setStyle(tickFont=pg.QtGui.QFont("monospace", 6))
+        tick = pg.QtGui.QFont("monospace", 6)
+        lbl = {"color": "#aaa", "font-size": "7pt"}
+        # units in the label text (no units= kwarg -> avoids pyqtgraph's SI
+        # auto-prefix turning "mV" into "mmV")
+        left = p.getAxis("left")
+        left.setStyle(tickFont=tick)
+        left.setLabel("amplitude (mV)", **lbl)           # Y axis = signal amplitude
+        bottom = p.getAxis("bottom")
+        bottom.setStyle(tickFont=tick)
+        if show_time:
+            bottom.setLabel("time (s)", **lbl)           # X axis = seconds in window
+        else:
+            # top plot shares the x-axis with the bottom one; keep it clean
+            bottom.setStyle(showValues=False)
         return p
 
     def _set_status(self, s):
