@@ -18,6 +18,7 @@
   #monitor .traces{flex:1;min-height:0;gap:7px}
   #monitor .trace{flex:1;min-height:0}
   #monitor .trace.fe{flex:1.35}
+  #monitor .trace.fhr-trend{flex:1.1}
   #monitor .trace canvas{position:absolute;inset:0;width:100%;height:100%}
 </style>
 </head>
@@ -27,6 +28,7 @@
       <a class="back" href="/">‹</a>
       <div class="title" style="font-size:14px"><span id="ptitle">Patient</span></div>
       <div class="grow"></div>
+      <span id="clock" style="font-size:11px;color:var(--muted);font-variant-numeric:tabular-nums;min-width:52px;text-align:right;line-height:1.1"></span>
       <span class="pill idle" id="status">idle</span>
       <button class="btn icon" id="freeze" title="Freeze trace">❚❚</button>
     </div>
@@ -49,6 +51,7 @@
           </div>
         </div>
         <div class="traces">
+          <div class="trace fhr-trend" id="t_fhr"><span class="tag"><i style="background:var(--fecg)"></i>FHR trend</span><canvas></canvas></div>
           <div class="trace" id="t_raw"><span class="tag"><i style="background:var(--raw)"></i>Raw abdominal</span><canvas></canvas></div>
           <div class="trace fe" id="t_fe"><span class="tag"><i style="background:var(--fecg)"></i>fECG · AI extracted</span><canvas></canvas></div>
         </div>
@@ -85,9 +88,17 @@
 <script src="/static/app.js"></script>
 <script>
 const PID = decodeURIComponent(location.pathname.split('/').pop());
+// WINDOW sized to hold ~6 s at 250 Hz.  We store the device timestamp alongside
+// amplitude so we can render both traces on the *same time grid*.
 const WINDOW = 1500;
-const buf = { raw:new Float32Array(WINDOW), fe:new Float32Array(WINDOW) };
+const buf = {
+  t:   new Float64Array(WINDOW),   // device timestamp (seconds, relative)
+  raw: new Float32Array(WINDOW),
+  fe:  new Float32Array(WINDOW),
+};
 let head = 0, filled = 0, frozen = false;
+// Track device time so the x-axis never jumps on WS burst/stall
+let tBase = null;           // first received t value (seconds offset origin)
 let patient = null, idleTimer = null;
 
 /* ---- tabs ---- */
@@ -145,37 +156,135 @@ let cRaw, cFe, ctxRaw, ctxFe;
 function resize(){
   cRaw=$('#t_raw canvas'); cFe=$('#t_fe canvas');
   ctxRaw=setup(cRaw); ctxFe=setup(cFe);
+  cFhrTrend=$('#t_fhr canvas');
+  if(cFhrTrend) ctxFhrTrend=setup(cFhrTrend);
 }
 window.addEventListener('resize', resize);
 
-function pushSample(raw, fe){
+// Push one sample with its device timestamp.
+// Both traces share the same t[] so their x-positions are identical — guaranteed
+// time alignment regardless of WS jitter or batch size variation.
+function pushSample(t, raw, fe){
   if (frozen) return;
-  buf.raw[head]=raw; buf.fe[head]=fe;
-  head=(head+1)%WINDOW; filled=Math.min(filled+1,WINDOW);
+  if (tBase === null) tBase = t;
+  buf.t[head]   = t - tBase;
+  buf.raw[head] = raw;
+  buf.fe[head]  = fe;
+  head = (head + 1) % WINDOW;
+  filled = Math.min(filled + 1, WINDOW);
 }
+
+// Draw one trace onto ctx using the shared time axis stored in buf.t.
+// VISIBLE_SEC controls the rolling window width (matches device PLOT_WINDOW_SECONDS).
+const VISIBLE_SEC = 6.0;
 function drawTrace(ctx, canvas, arr, color){
-  const W=canvas.clientWidth, H=canvas.clientHeight;
-  ctx.clearRect(0,0,W,H);
-  ctx.strokeStyle='rgba(255,255,255,0.045)'; ctx.lineWidth=1;
-  for(let x=W%40;x<W;x+=40){ctx.beginPath();ctx.moveTo(x,0);ctx.lineTo(x,H);ctx.stroke();}
-  for(let y=H/2%30;y<H;y+=30){ctx.beginPath();ctx.moveTo(0,y);ctx.lineTo(W,y);ctx.stroke();}
-  if(filled<2) return;
-  let mx=0.05; for(let i=0;i<filled;i++){const v=Math.abs(arr[i]); if(v>mx)mx=v;} mx*=1.25;
-  ctx.strokeStyle=color; ctx.lineWidth=1.4; ctx.lineJoin='round'; ctx.beginPath();
-  const n=filled, step=Math.max(1,Math.floor(n/W));
-  let first=true;
-  for(let i=0;i<n;i+=step){
-    const idx=(head-n+i+WINDOW*2)%WINDOW;
-    const x=W*i/(n-1);
-    const y=H/2-(arr[idx]/mx)*(H/2*0.88);
-    first?(ctx.moveTo(x,y),first=false):ctx.lineTo(x,y);
+  const W = canvas.clientWidth, H = canvas.clientHeight;
+  ctx.clearRect(0, 0, W, H);
+
+  // --- grid: vertical lines every 1 s, horizontal centre line ---
+  const pxPerSec = W / VISIBLE_SEC;
+  ctx.strokeStyle = 'rgba(255,255,255,0.06)'; ctx.lineWidth = 1;
+  // minor tick every 0.2 s (like a CTG strip at 1 cm/min ≈ standard grid)
+  for(let s = 0.2; s < VISIBLE_SEC; s += 0.2){
+    const thick = Number.isInteger(Math.round(s * 10) / 10) && (Math.round(s * 10) % 10 === 0);
+    ctx.strokeStyle = thick ? 'rgba(255,255,255,0.13)' : 'rgba(255,255,255,0.045)';
+    const gx = s * pxPerSec;
+    ctx.beginPath(); ctx.moveTo(gx, 0); ctx.lineTo(gx, H); ctx.stroke();
+  }
+  // horizontal centre
+  ctx.strokeStyle = 'rgba(255,255,255,0.07)'; ctx.lineWidth = 1;
+  ctx.beginPath(); ctx.moveTo(0, H/2); ctx.lineTo(W, H/2); ctx.stroke();
+
+  if (filled < 2) return;
+
+  // Determine the current "right edge" time (newest sample)
+  const newestIdx = (head - 1 + WINDOW) % WINDOW;
+  const tNow = buf.t[newestIdx];
+  const tLeft = tNow - VISIBLE_SEC;    // oldest time visible
+
+  // Auto-scale amplitude
+  let mx = 0.05;
+  for (let i = 0; i < filled; i++) { const v = Math.abs(arr[i]); if (v > mx) mx = v; }
+  mx *= 1.25;
+
+  ctx.strokeStyle = color; ctx.lineWidth = 1.4; ctx.lineJoin = 'round'; ctx.beginPath();
+  let first = true;
+  for (let i = 0; i < filled; i++) {
+    const idx = (head - filled + i + WINDOW * 2) % WINDOW;
+    const ts  = buf.t[idx];
+    if (ts < tLeft) continue;                              // outside visible window
+    const px  = (ts - tLeft) / VISIBLE_SEC * W;
+    const py  = H / 2 - (arr[idx] / mx) * (H / 2 * 0.88);
+    first ? (ctx.moveTo(px, py), first = false) : ctx.lineTo(px, py);
   }
   ctx.stroke();
 }
-const C={raw:'#22d3ee',fe:'#ff5c9d'};
+// FHR trend buffer — stores (device_time, bpm) pairs for CTG-style BPM plot
+const FHR_BUF_SEC = 120;   // keep 2 minutes of FHR history
+const fhrTrend = { t: [], v: [] };  // parallel arrays, max FHR_BUF_SEC seconds
+
+function pushFhrTrend(t_abs, bpm){
+  if (tBase === null) return;
+  const t = t_abs - tBase;
+  fhrTrend.t.push(t);
+  fhrTrend.v.push(bpm);
+  // Trim old entries
+  const cutoff = t - FHR_BUF_SEC;
+  while(fhrTrend.t.length && fhrTrend.t[0] < cutoff){
+    fhrTrend.t.shift(); fhrTrend.v.shift();
+  }
+}
+
+// Draw FHR trend on a fixed y-axis 60–220 bpm (standard CTG style)
+const FHR_Y_MIN = 60, FHR_Y_MAX = 220;
+let cFhrTrend, ctxFhrTrend;
+function drawFhrTrend(ctx, canvas){
+  const W = canvas.clientWidth, H = canvas.clientHeight;
+  ctx.clearRect(0, 0, W, H);
+
+  // Fixed y-axis grid: lines at 60,80,100,120,140,160,180,200,220
+  const pxPerBpm = H / (FHR_Y_MAX - FHR_Y_MIN);
+  for(const bpm of [80,100,120,140,160,180,200]){
+    const gy = H - (bpm - FHR_Y_MIN) * pxPerBpm;
+    ctx.strokeStyle = bpm === 110 || bpm === 160
+      ? 'rgba(255,200,0,0.20)'    // alarm thresholds highlighted
+      : 'rgba(255,255,255,0.06)';
+    ctx.lineWidth = bpm === 110 || bpm === 160 ? 1.5 : 1;
+    ctx.beginPath(); ctx.moveTo(0, gy); ctx.lineTo(W, gy); ctx.stroke();
+    // bpm label on left
+    ctx.fillStyle = bpm===110||bpm===160 ? 'rgba(255,200,0,0.55)' : 'rgba(150,160,180,0.55)';
+    ctx.font = '8px monospace'; ctx.textAlign = 'left';
+    ctx.fillText(String(bpm), 2, gy - 1);
+  }
+  // Vertical time grid (reuse VISIBLE_SEC)
+  const pxPerSec = W / VISIBLE_SEC;
+  ctx.strokeStyle = 'rgba(255,255,255,0.045)'; ctx.lineWidth = 1;
+  for(let s = 1; s < VISIBLE_SEC; s++){
+    const gx = s * pxPerSec;
+    ctx.beginPath(); ctx.moveTo(gx, 0); ctx.lineTo(gx, H); ctx.stroke();
+  }
+
+  if(fhrTrend.t.length < 2) return;
+  const tNow = fhrTrend.t[fhrTrend.t.length - 1];
+  const tLeft = tNow - VISIBLE_SEC;
+
+  ctx.strokeStyle = 'var(--fecg)'; ctx.lineWidth = 1.8;
+  ctx.lineJoin = 'round'; ctx.lineCap = 'round'; ctx.beginPath();
+  let first = true;
+  for(let i = 0; i < fhrTrend.t.length; i++){
+    const ts = fhrTrend.t[i];
+    if(ts < tLeft) continue;
+    const bpm = fhrTrend.v[i];
+    const px = (ts - tLeft) / VISIBLE_SEC * W;
+    const py = H - (bpm - FHR_Y_MIN) * pxPerBpm;
+    first ? (ctx.moveTo(px, py), first = false) : ctx.lineTo(px, py);
+  }
+  ctx.stroke();
+}
 function render(){
   if(ctxRaw) drawTrace(ctxRaw,cRaw,buf.raw,C.raw);
   if(ctxFe)  drawTrace(ctxFe,cFe,buf.fe,C.fe);
+  if(ctxFhrTrend && cFhrTrend) drawFhrTrend(ctxFhrTrend, cFhrTrend);
   requestAnimationFrame(render);
 }
 
@@ -196,7 +305,7 @@ async function loadMeta(){
     `<tr><td>${s.id}</td><td>${fmtTime(s.started_at)}</td><td>${fmtTime(s.ended_at)}</td><td>${s.sample_rate||'—'} Hz</td></tr>`
   ).join('') || '<tr><td colspan="4" class="muted">No sessions yet</td></tr>';
   if(data.live) applyMetrics(data.live);
-  if(!firstPreloaded){ for(const r of (data.recent||[])) pushSample(r[1],r[2]); firstPreloaded=true; }
+  if(!firstPreloaded){ for(const r of (data.recent||[])) pushSample(r[0],r[1],r[2]); firstPreloaded=true; }
 }
 let firstPreloaded=false;
 
@@ -216,8 +325,15 @@ function connect(){
   ws.onmessage = e => {
     const m=JSON.parse(e.data);
     if(m.type==='samples'){
-      if(m.data) for(const r of m.data) pushSample(r[1],r[2]);
-      if(m.metrics) applyMetrics(m.metrics);
+      if(m.data) for(const r of m.data) pushSample(r[0],r[1],r[2]);
+      if(m.metrics) {
+        applyMetrics(m.metrics);
+        // Feed FHR trend: use the last received device timestamp as the time anchor
+        if(m.metrics.fhr != null && filled > 0){
+          const lastT = buf.t[(head - 1 + WINDOW) % WINDOW] + (tBase || 0);
+          pushFhrTrend(lastT, m.metrics.fhr);
+        }
+      }
     }
   };
   ws.onclose = () => { clearInterval(ping); setTimeout(connect,2000); };
@@ -226,6 +342,35 @@ function connect(){
 
 resize(); render(); loadMeta(); connect();
 setInterval(loadMeta, 8000);
+
+/* ---- real-time clock + recording elapsed timer ---- */
+let recStart = null;
+function updateClock(){
+  const now = new Date();
+  const hh = String(now.getHours()).padStart(2,'0');
+  const mm = String(now.getMinutes()).padStart(2,'0');
+  const ss = String(now.getSeconds()).padStart(2,'0');
+  let txt = `${hh}:${mm}:${ss}`;
+  if (recStart !== null) {
+    const elap = Math.floor((Date.now() - recStart) / 1000);
+    const em = String(Math.floor(elap/60)).padStart(2,'0');
+    const es = String(elap % 60).padStart(2,'0');
+    txt += `\n${em}:${es}`;
+  }
+  const el = $('#clock'); if(el) el.textContent = txt;
+}
+setInterval(updateClock, 1000);
+updateClock();
+
+/* Start the recording timer the first time we get a live sample */
+const _origPush = pushSample;
+(function(){
+  let started = false;
+  window.pushSample = function(t, raw, fe){
+    if(!started && !frozen){ started=true; recStart=Date.now(); }
+    _origPush(t, raw, fe);
+  };
+})();
 </script>
 </body>
 </html>
