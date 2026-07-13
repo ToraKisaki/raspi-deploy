@@ -18,7 +18,7 @@ extra hop and drains over the next hop window, keeping latency bounded at ≤2 h
 (~400 ms) rather than accumulating unboundedly.
 
     proc = FecgProcessor()
-    fe = proc.push(raw_sample)   # always returns the aligned fECG sample
+    me, fe = proc.push(raw_sample)   # aligned hidden mECG + displayed fECG
 """
 
 from collections import deque
@@ -45,9 +45,11 @@ class FecgProcessor:
         # Each element corresponds 1-to-1 to a raw sample that has already
         # been pushed into _buf.  We append HOP_SAMPLES at a time after each
         # inference and pop one per push() call.
-        self._queue: deque[float] = deque()
+        self._mecg_queue: deque[float] = deque()
+        self._fecg_queue: deque[float] = deque()
 
         # Fallback when the queue is empty (pre-warm or model not loaded)
+        self._last_me = 0.0
         self._last_fe = 0.0
 
     # ------------------------------------------------------------------
@@ -72,7 +74,7 @@ class FecgProcessor:
     # Public API
     # ------------------------------------------------------------------
 
-    def push(self, value: float) -> float:
+    def push(self, value: float):
         """
         Ingest one raw sample.  Returns the fECG sample aligned to this
         same time position.
@@ -89,27 +91,36 @@ class FecgProcessor:
             self._run_inference()
 
         # Drain one aligned output sample per push
-        if self._queue:
-            fe = self._queue.popleft()
+        if self._fecg_queue:
+            me = self._mecg_queue.popleft()
+            fe = self._fecg_queue.popleft()
+            self._last_me = me
             self._last_fe = fe
-            return fe
-        return self._last_fe
+            return me, fe
+        return self._last_me, self._last_fe
 
     def _run_inference(self):
         """Run the model on the current window and enqueue the fresh outputs."""
         window = self._ordered_window()
         try:
-            out = self.extractor(window)
-            if out.shape[0] != WINDOW_SAMPLES:
-                out = np.interp(
+            mecg, fecg = self.extractor(window)
+            if fecg.shape[0] != WINDOW_SAMPLES:
+                fecg = np.interp(
                     np.linspace(0, 1, WINDOW_SAMPLES),
-                    np.linspace(0, 1, out.shape[0]),
-                    out,
+                    np.linspace(0, 1, fecg.shape[0]),
+                    fecg,
+                ).astype(np.float32)
+            if mecg.shape[0] != WINDOW_SAMPLES:
+                mecg = np.interp(
+                    np.linspace(0, 1, WINDOW_SAMPLES),
+                    np.linspace(0, 1, mecg.shape[0]),
+                    mecg,
                 ).astype(np.float32)
             # The last HOP_SAMPLES of the output correspond to the HOP_SAMPLES
             # raw samples that were just pushed since the previous inference.
-            fresh = out[-HOP_SAMPLES:]
-            self._queue.extend(float(v) for v in fresh)
+            self._mecg_queue.extend(float(v) for v in mecg[-HOP_SAMPLES:])
+            self._fecg_queue.extend(float(v) for v in fecg[-HOP_SAMPLES:])
         except Exception:
             # On model failure: fill with zeros so the trace doesn't freeze
-            self._queue.extend(0.0 for _ in range(HOP_SAMPLES))
+            self._mecg_queue.extend(0.0 for _ in range(HOP_SAMPLES))
+            self._fecg_queue.extend(0.0 for _ in range(HOP_SAMPLES))

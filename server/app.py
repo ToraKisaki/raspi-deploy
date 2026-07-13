@@ -261,6 +261,7 @@ async def api_create_patient(request: Request):
             mrn=body.get("mrn"),
             sex=body.get("sex"),
             dob=body.get("dob"),
+            gestational_weeks=body.get("gestational_weeks"),
             notes=body.get("notes"),
         )
     except ValueError as e:
@@ -280,6 +281,7 @@ async def api_update_patient(request: Request, patient_id: str):
         mrn=body.get("mrn"),
         sex=body.get("sex"),
         dob=body.get("dob"),
+        gestational_weeks=body.get("gestational_weeks"),
         notes=body.get("notes"),
     )
 

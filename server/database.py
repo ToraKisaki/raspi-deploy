@@ -46,6 +46,7 @@ def init_db():
             mrn TEXT,
             sex TEXT,
             dob TEXT,
+            gestational_weeks INTEGER,
             notes TEXT,
             created_at REAL,
             archived INTEGER DEFAULT 0
@@ -76,6 +77,8 @@ def init_db():
     cols = {r["name"] for r in c.execute("PRAGMA table_info(patients)").fetchall()}
     if "archived" not in cols:
         c.execute("ALTER TABLE patients ADD COLUMN archived INTEGER DEFAULT 0")
+    if "gestational_weeks" not in cols:
+        c.execute("ALTER TABLE patients ADD COLUMN gestational_weeks INTEGER")
     c.commit()
 
 
@@ -141,10 +144,11 @@ def delete_login(token):
 
 
 # ---------- patients ----------
-PATIENT_FIELDS = ("name", "mrn", "sex", "dob", "notes")
+PATIENT_FIELDS = ("name", "mrn", "sex", "dob", "gestational_weeks", "notes")
 
 
-def upsert_patient(pid, name=None, mrn=None, sex=None, dob=None, notes=None):
+def upsert_patient(pid, name=None, mrn=None, sex=None, dob=None,
+                   gestational_weeks=None, notes=None):
     """Create a patient if missing (used by the device on first connect).
 
     Existing patients are left untouched (a reconnect must not clobber details
@@ -157,14 +161,15 @@ def upsert_patient(pid, name=None, mrn=None, sex=None, dob=None, notes=None):
         c.commit()
         return
     c.execute(
-        "INSERT INTO patients(id,name,mrn,sex,dob,notes,created_at,archived) "
-        "VALUES(?,?,?,?,?,?,?,0)",
-        (pid, name or pid, mrn, sex, dob, notes, time.time()),
+        "INSERT INTO patients(id,name,mrn,sex,dob,gestational_weeks,notes,created_at,archived) "
+        "VALUES(?,?,?,?,?,?,?,?,0)",
+        (pid, name or pid, mrn, sex, dob, gestational_weeks, notes, time.time()),
     )
     c.commit()
 
 
-def create_patient(pid, name=None, mrn=None, sex=None, dob=None, notes=None):
+def create_patient(pid, name=None, mrn=None, sex=None, dob=None,
+                   gestational_weeks=None, notes=None):
     """Explicit clinician-driven create. Raises ValueError if the id exists."""
     pid = (pid or "").strip()
     if not pid:
@@ -173,9 +178,9 @@ def create_patient(pid, name=None, mrn=None, sex=None, dob=None, notes=None):
     if c.execute("SELECT id FROM patients WHERE id=?", (pid,)).fetchone():
         raise ValueError(f"patient '{pid}' already exists")
     c.execute(
-        "INSERT INTO patients(id,name,mrn,sex,dob,notes,created_at,archived) "
-        "VALUES(?,?,?,?,?,?,?,0)",
-        (pid, (name or pid).strip(), mrn, sex, dob, notes, time.time()),
+        "INSERT INTO patients(id,name,mrn,sex,dob,gestational_weeks,notes,created_at,archived) "
+        "VALUES(?,?,?,?,?,?,?,?,0)",
+        (pid, (name or pid).strip(), mrn, sex, dob, gestational_weeks, notes, time.time()),
     )
     c.commit()
     return get_patient(pid)

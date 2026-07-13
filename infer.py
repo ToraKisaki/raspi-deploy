@@ -35,14 +35,21 @@ def preprocess(signal_992: np.ndarray):
     return x[None, None, :], mu, sigma  # [1, 1, 992], scalar, scalar
 
 
-def postprocess(output: np.ndarray, mu: float, sigma: float) -> np.ndarray:
-    """Denormalize model output back to original amplitude."""
-    # output shape: [1, 2, 992] (dual-branch) or [1, 1, 992] (single)
+def postprocess_components(output: np.ndarray, mu: float, sigma: float):
+    """Denormalize and return (mECG, fECG) model components."""
     if output.shape[1] == 2:
-        fecg = output[0, 1, :]  # fECG is channel index 1
+        mecg = output[0, 0, :]
+        fecg = output[0, 1, :]
     else:
         fecg = output[0, 0, :]
-    return (fecg * sigma + mu).astype(np.float32)
+        mecg = np.zeros_like(fecg)
+    return ((mecg * sigma + mu).astype(np.float32),
+            (fecg * sigma + mu).astype(np.float32))
+
+
+def postprocess(output: np.ndarray, mu: float, sigma: float) -> np.ndarray:
+    """Denormalize model output and return fECG for the batch CLI."""
+    return postprocess_components(output, mu, sigma)[1]
 
 
 def load_session(model_path: str = MODEL_PATH) -> ort.InferenceSession:
@@ -55,6 +62,12 @@ def run_inference(session: ort.InferenceSession, signal_992: np.ndarray) -> np.n
     x, mu, sigma = preprocess(signal_992)
     out = session.run(None, {"input": x})[0]
     return postprocess(out, mu, sigma)
+
+
+def run_inference_components(session: ort.InferenceSession, signal_992: np.ndarray):
+    x, mu, sigma = preprocess(signal_992)
+    out = session.run(None, {"input": x})[0]
+    return postprocess_components(out, mu, sigma)
 
 
 def sliding_window_inference(session: ort.InferenceSession, signal: np.ndarray, step: int = SAMPLE_LEN) -> np.ndarray:

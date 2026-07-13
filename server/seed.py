@@ -11,11 +11,12 @@ else:
     print("doctor already exists")
 
 DEMO = [
-    ("P001", "Jane Doe", "MRN-0001", "F", "1994-05-02", "32 weeks gestation"),
-    ("P002", "Maria Santos", "MRN-0002", "F", "1991-11-18", "28 weeks • twin pregnancy"),
-    ("P003", "Aisha Khan", "MRN-0003", "F", "1996-02-09", "36 weeks • routine monitoring"),
+    ("P001", "Nguyễn Linh Minh", "MRN-0001", "F", "1994-05-02", 32, "32 weeks gestation"),
+    ("P002", "Maria Santos", "MRN-0002", "F", "1991-11-18", 28, "28 weeks • twin pregnancy"),
+    ("P003", "Aisha Khan", "MRN-0003", "F", "1996-02-09", 36, "36 weeks • routine monitoring"),
 ]
-for pid, name, mrn, sex, dob, notes in DEMO:
-    db.upsert_patient(pid, name=name, mrn=mrn, sex=sex, dob=dob, notes=notes)
+for pid, name, mrn, sex, dob, weeks, notes in DEMO:
+    db.upsert_patient(pid, name=name, mrn=mrn, sex=sex, dob=dob,
+                      gestational_weeks=weeks, notes=notes)
 print(f"seeded {len(DEMO)} patients: " + ", ".join(p[0] for p in DEMO))
 print("\nLogin at http://localhost:8000/login  (doctor / password)")

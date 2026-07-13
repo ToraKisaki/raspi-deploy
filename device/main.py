@@ -54,6 +54,7 @@ class Acquirer(QtCore.QObject):
     def __init__(self, force_sim=False, file_path=None, loop=True):
         super().__init__()
         self.raw = np.zeros(BUF, dtype=np.float32)
+        self.mecg = np.zeros(BUF, dtype=np.float32)
         self.fecg = np.zeros(BUF, dtype=np.float32)
         self._lock = threading.Lock()
         self.force_sim = force_sim
@@ -77,17 +78,19 @@ class Acquirer(QtCore.QObject):
             if self._stop.is_set():
                 break
             raw = float(ch[ABDOMINAL_CHANNEL])
-            fe = self.proc.push(raw)
+            me, fe = self.proc.push(raw)
             with self._lock:
                 self.raw[:-1] = self.raw[1:]
                 self.raw[-1] = raw
+                self.mecg[:-1] = self.mecg[1:]
+                self.mecg[-1] = me
                 self.fecg[:-1] = self.fecg[1:]
                 self.fecg[-1] = fe
             self.uploader.push(time.time() - self.t0, raw, fe)
 
     def snapshot(self):
         with self._lock:
-            return self.raw.copy(), self.fecg.copy()
+            return self.raw.copy(), self.mecg.copy(), self.fecg.copy()
 
     def stop(self):
         self._stop.set()
@@ -216,7 +219,7 @@ class Monitor(QtWidgets.QWidget):
         # auto-prefix turning "mV" into "mmV")
         left = p.getAxis("left")
         left.setStyle(tickFont=tick)
-        left.setLabel("amplitude (mV)", **lbl)           # Y axis = signal amplitude
+        left.setLabel("amplitude (a.u.)", **lbl)         # Y axis = signal amplitude
         bottom = p.getAxis("bottom")
         bottom.setStyle(tickFont=tick)
         if show_time:
@@ -262,10 +265,12 @@ class Monitor(QtWidgets.QWidget):
             bits.append(name)
         if p.get("mrn"):
             bits.append(f"MRN {p['mrn']}")
+        if p.get("gestational_weeks") is not None:
+            bits.append(f"GA {p['gestational_weeks']}w")
         self.header.setText(f"{' · '.join(bits)}   •   {self._source}")
 
     def _update(self):
-        raw, fe = self.acq.snapshot()
+        raw, me, fe = self.acq.snapshot()
         self.c_raw.setData(self.x, raw)
         self.c_fe.setData(self.x, fe)
         # auto-range Y only (X is fixed & linked, so both stay time-aligned)
@@ -275,12 +280,12 @@ class Monitor(QtWidgets.QWidget):
 
         self._frame += 1
         if self._frame % self.HR_EVERY == 0:
-            self._update_hr(raw, fe)
+            self._update_hr(me, fe)
 
-    def _update_hr(self, raw, fe):
+    def _update_hr(self, me, fe):
         fs = SAMPLE_RATE_HZ
         f = estimate_bpm(fe, fs, FHR_MIN, FHR_MAX, FHR_REFRACTORY_S)
-        m = estimate_bpm(raw, fs, MHR_MIN, MHR_MAX, MHR_REFRACTORY_S)
+        m = estimate_bpm(me, fs, MHR_MIN, MHR_MAX, MHR_REFRACTORY_S)
         if f is not None:
             self.fhr = ema(self.fhr, f)
         if m is not None:

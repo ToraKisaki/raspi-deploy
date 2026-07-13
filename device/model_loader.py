@@ -7,7 +7,7 @@ normalization, fECG = output channel 1). There is ONE source of truth for the
 model maths: infer.py. We just import it.
 
     extractor, info = load_extractor()
-    fecg_992 = extractor(window_992)   # float32[992] -> float32[992]
+    mecg_992, fecg_992 = extractor(window_992)
 
 If onnxruntime / scipy / the model file aren't available (e.g. developing on a
 laptop without the wheel), we fall back to a lightweight template-subtraction
@@ -47,7 +47,8 @@ class UnetrExtractor:
             n = min(w.shape[0], WINDOW_SAMPLES)
             out[:n] = w[:n]
             w = out
-        return self._infer.run_inference(self.session, w).astype(np.float32)
+        mecg, fecg = self._infer.run_inference_components(self.session, w)
+        return mecg.astype(np.float32), fecg.astype(np.float32)
 
 
 class PlaceholderExtractor:
@@ -97,7 +98,8 @@ class PlaceholderExtractor:
                 a, b = p - half, p + half
                 if a >= 0 and b < len(x):
                     residual[a:b] -= tmpl
-        return (self._bandpass(residual, 3.0, 45.0) * 2.0).astype(np.float32)
+        fecg = (self._bandpass(residual, 3.0, 45.0) * 2.0).astype(np.float32)
+        return mat.astype(np.float32), fecg
 
 
 def load_extractor():

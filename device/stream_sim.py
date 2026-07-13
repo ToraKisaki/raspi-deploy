@@ -10,11 +10,14 @@ machine.
 """
 import time
 import argparse
+from collections import deque
 
 import config
 from acquisition import SimulatedSource
 from fecg_processor import FecgProcessor
 from uploader import Uploader
+from hr import (estimate_bpm, ema, FHR_MIN, FHR_MAX, MHR_MIN, MHR_MAX,
+                FHR_REFRACTORY_S, MHR_REFRACTORY_S)
 
 
 def main():
@@ -30,9 +33,25 @@ def main():
     src = SimulatedSource()
     t0 = time.time()
     n = 0
+    window_size = int(config.SAMPLE_RATE_HZ * config.PLOT_WINDOW_SECONDS)
+    mecg_window = deque(maxlen=window_size)
+    fecg_window = deque(maxlen=window_size)
+    fhr = mhr = None
     for ch in src.samples():
         raw = float(ch[config.ABDOMINAL_CHANNEL])
-        fe = proc.push(raw)
+        me, fe = proc.push(raw)
+        mecg_window.append(me)
+        fecg_window.append(fe)
+        if n % 50 == 0 and len(fecg_window) == window_size:
+            fetal = estimate_bpm(fecg_window, config.SAMPLE_RATE_HZ,
+                                 FHR_MIN, FHR_MAX, FHR_REFRACTORY_S)
+            maternal = estimate_bpm(mecg_window, config.SAMPLE_RATE_HZ,
+                                    MHR_MIN, MHR_MAX, MHR_REFRACTORY_S)
+            if fetal is not None:
+                fhr = ema(fhr, fetal)
+            if maternal is not None:
+                mhr = ema(mhr, maternal)
+            up.set_metrics(fhr, mhr)
         up.push(time.time() - t0, raw, fe)
         n += 1
         if n % config.SAMPLE_RATE_HZ == 0:
