@@ -36,6 +36,7 @@ class Uploader:
         self.enabled = _HAVE_WS
         self.session_id = None
         self.patient = None        # {id,name,mrn,sex,dob,notes} from server ack
+        self.metrics = {"fhr": None, "mhr": None}
         if self.enabled:
             threading.Thread(target=self._run, daemon=True).start()
 
@@ -49,6 +50,9 @@ class Uploader:
             except queue.Full:
                 pass  # drop oldest by simply discarding this batch
             self._batch = []
+
+    def set_metrics(self, fhr, mhr):
+        self.metrics = {"fhr": fhr, "mhr": mhr}
 
     def _run(self):
         while not self._stop.is_set():
@@ -82,6 +86,7 @@ class Uploader:
                         "type": "samples",
                         "patient_id": self.patient_id,
                         "data": batch,
+                        "metrics": self.metrics,
                     }))
             except Exception as e:
                 self.connected = False

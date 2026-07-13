@@ -257,7 +257,7 @@ class Monitor(QtWidgets.QWidget):
         """Compose the header from patient identity (from server) + source."""
         p = getattr(self.acq.uploader, "patient", None) or {}
         bits = [PATIENT_ID]
-        name = p.get("name")
+        name = p.get("full_name") or p.get("name")
         if name and name != PATIENT_ID:
             bits.append(name)
         if p.get("mrn"):
@@ -287,6 +287,7 @@ class Monitor(QtWidgets.QWidget):
             self.mhr = ema(self.mhr, m)
         self.fhr_tile.set(self.fhr)
         self.mhr_tile.set(self.mhr)
+        self.acq.uploader.set_metrics(self.fhr, self.mhr)
 
         # append to the trend (NaN where unknown so the line breaks, not dips)
         self.fhr_hist.append(self.fhr if self.fhr is not None else np.nan)
